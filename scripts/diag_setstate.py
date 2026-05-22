@@ -21,6 +21,7 @@ It will:
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
 import os
 import sys
@@ -35,7 +36,7 @@ from custom_components.velux_active.api import (
     VeluxActiveAuthError,
     VeluxActiveCommandError,
     VeluxActiveConnectionError,
-    _extract_setstate_errors,
+    extract_setstate_errors,
 )
 from custom_components.velux_active.const import (
     DEFAULT_CLIENT_ID,
@@ -114,7 +115,7 @@ async def _post_setstate(
 async def main() -> None:
     print("=== Velux Active setstate diagnostic ===")
     username = _input("Email address")
-    password = _input("Password")
+    password = getpass.getpass("Password: ")
 
     async with aiohttp.ClientSession() as session:
         api = VeluxActiveApi(
@@ -153,7 +154,7 @@ async def main() -> None:
             position,
         )
 
-        errors = _extract_setstate_errors(body)
+        errors = extract_setstate_errors(body)
         if errors:
             print()
             print(

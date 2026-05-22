@@ -92,8 +92,16 @@ logger:
   default: warning
   logs:
     custom_components.velux_active: debug
-    aiohttp.client: debug
 ```
+
+> ⚠️ **Do not enable `aiohttp.client: debug`** when sharing logs publicly:
+> it dumps full request headers including the `Authorization: ******* bearer
+> token and the `access_token` / `refresh_token` form fields. The
+> `custom_components.velux_active: debug` channel is enough to capture the
+> setstate request URL and the full response body (including `body.errors`)
+> without leaking credentials. If you must enable `aiohttp.client: debug`
+> for deeper triage, redact `Authorization`, `access_token`, and
+> `refresh_token` before pasting anything into an issue.
 
 With this branch installed, every setstate call now logs its full
 request + response body. Search the log for `setstate` after a failed
