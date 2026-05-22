@@ -111,6 +111,25 @@ class VeluxActiveCover(CoordinatorEntity[VeluxActiveCoordinator], CoverEntity):
                 return mod
         return {}
 
+    @property
+    def _current_bridge_id(self) -> str:
+        """Return the freshest known bridge id for this module.
+
+        Prefer the bridge id from the latest coordinator payload (which is
+        re-synced from homesdata every ~30 minutes). Fall back to the value
+        cached at entity construction. This avoids silently sending setstate
+        to a stale bridge id after a KIX 300 re-pairing.
+        """
+        mod = self._module
+        if isinstance(mod, dict):
+            bridge = mod.get("bridge")
+            if isinstance(bridge, str) and bridge:
+                return bridge
+        from_cache = self.coordinator.module_bridges.get(self._module_id)
+        if from_cache:
+            return from_cache
+        return self._bridge_id
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Update cached state from the coordinator and write to HA."""
@@ -156,37 +175,28 @@ class VeluxActiveCover(CoordinatorEntity[VeluxActiveCoordinator], CoverEntity):
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover fully (100%)."""
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._bridge_id, self._module_id, 100
+            self.coordinator.home_id, self._current_bridge_id, self._module_id, 100
         )
-        # Optimistic update – give instant UI feedback before the next poll
-        self._attr_current_cover_position = 100
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover fully (0%)."""
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._bridge_id, self._module_id, 0
+            self.coordinator.home_id, self._current_bridge_id, self._module_id, 0
         )
-        # Optimistic update – give instant UI feedback before the next poll
-        self._attr_current_cover_position = 0
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Set the cover to a specific position."""
         position: int = kwargs[ATTR_POSITION]
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._bridge_id, self._module_id, position
+            self.coordinator.home_id, self._current_bridge_id, self._module_id, position
         )
-        # Optimistic update – give instant UI feedback before the next poll
-        self._attr_current_cover_position = position
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop any cover movement."""
         await self.coordinator.api.async_stop_movements(
-            self.coordinator.home_id, self._bridge_id
+            self.coordinator.home_id, self._current_bridge_id
         )
         await self.coordinator.async_request_refresh()
