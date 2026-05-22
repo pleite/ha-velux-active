@@ -9,6 +9,7 @@ import pytest
 from custom_components.velux_active.api import (
     VeluxActiveApi,
     VeluxActiveAuthError,
+    VeluxActiveCommandError,
     VeluxActiveConnectionError,
 )
 from tests.conftest import (
@@ -246,3 +247,103 @@ class TestApiMethods:
 
         with pytest.raises(VeluxActiveAuthError):
             await api.async_get_homes_data()
+
+
+class TestSetstateErrorSurfacing:
+    """Regression tests for the silent-failure bug.
+
+    The Velux cloud often returns HTTP 200 with a body describing a per-module
+    rejection (or a non-ok top-level status). Earlier versions of this
+    integration treated any HTTP 200 as success, which masked the root cause
+    of "HA accepts the command but the actuator never moves". These tests
+    pin the new behaviour: any per-command rejection must raise
+    VeluxActiveCommandError so the user (and HA's service-call layer) sees it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_set_cover_position_raises_on_errors_array(self) -> None:
+        """HTTP 200 with body.errors must raise VeluxActiveCommandError."""
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(
+                200,
+                {
+                    "body": {
+                        "errors": [
+                            {"id": MOCK_MODULE_ID, "code": 6}
+                        ]
+                    },
+                    "status": "ok",
+                },
+            )
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        with pytest.raises(VeluxActiveCommandError):
+            await api.async_set_cover_position(
+                MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 75
+            )
+
+    @pytest.mark.asyncio
+    async def test_set_cover_position_raises_on_non_ok_status(self) -> None:
+        """HTTP 200 with status != 'ok' must raise VeluxActiveCommandError."""
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "rejected"})
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        with pytest.raises(VeluxActiveCommandError):
+            await api.async_set_cover_position(
+                MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 50
+            )
+
+    @pytest.mark.asyncio
+    async def test_set_cover_position_ok_body_still_succeeds(self) -> None:
+        """A plain {"status":"ok"} body must NOT raise."""
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api.async_set_cover_position(
+            MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 50
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_movements_raises_on_errors_array(self) -> None:
+        """stop_movements must also surface per-bridge rejections."""
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(
+                200,
+                {"body": {"errors": [{"id": MOCK_BRIDGE_ID, "code": 13}]}},
+            )
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        with pytest.raises(VeluxActiveCommandError):
+            await api.async_stop_movements(MOCK_HOME_ID, MOCK_BRIDGE_ID)
+
+    @pytest.mark.asyncio
+    async def test_set_silent_mode_raises_on_errors_array(self) -> None:
+        """set_silent_mode must also surface per-module rejections."""
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(
+                200,
+                {"body": {"errors": [{"id": MOCK_MODULE_ID, "code": 6}]}},
+            )
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        with pytest.raises(VeluxActiveCommandError):
+            await api.async_set_silent_mode(
+                MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, True
+            )

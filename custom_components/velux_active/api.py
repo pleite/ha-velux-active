@@ -1,6 +1,7 @@
 """Velux ACTIVE API client."""
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -15,6 +16,8 @@ from .const import (
     SET_PERSONS_HOME_URL,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class VeluxActiveAuthError(Exception):
     """Authentication error."""
@@ -22,6 +25,52 @@ class VeluxActiveAuthError(Exception):
 
 class VeluxActiveConnectionError(Exception):
     """Connection error."""
+
+
+class VeluxActiveCommandError(VeluxActiveConnectionError):
+    """The cloud accepted the request (HTTP 200) but reported a per-command error.
+
+    Velux's syncapi/v1/setstate frequently returns HTTP 200 with a body of the form
+    ``{"body": {"errors": [...]}}`` or ``{"status": "<not-ok>"}`` when a command
+    is rejected by the cloud or by the KIX 300 gateway. Previously these were
+    silently treated as success, which masked the root cause of "command accepted
+    but device never moves" bugs. This exception surfaces them.
+    """
+
+
+def _extract_setstate_errors(body: Any) -> list[Any]:
+    """Return the list of per-command errors from a setstate response body, if any."""
+    if not isinstance(body, dict):
+        return []
+    inner = body.get("body")
+    if isinstance(inner, dict):
+        errs = inner.get("errors")
+        if isinstance(errs, list) and errs:
+            return errs
+    # Some Netatmo-compatible endpoints put errors at the top level
+    top_errs = body.get("errors")
+    if isinstance(top_errs, list) and top_errs:
+        return top_errs
+    return []
+
+
+def _raise_for_setstate_body(action: str, status: int, body: Any) -> None:
+    """Inspect a parsed setstate response body and raise if the cloud rejected it.
+
+    Velux returns HTTP 200 on rejections, so we cannot rely on ``resp.ok`` alone.
+    """
+    _LOGGER.debug("%s response (HTTP %s): %s", action, status, body)
+    errors = _extract_setstate_errors(body)
+    if errors:
+        raise VeluxActiveCommandError(
+            f"{action} rejected by Velux cloud: {errors}"
+        )
+    if isinstance(body, dict):
+        top_status = body.get("status")
+        if top_status is not None and top_status != "ok":
+            raise VeluxActiveCommandError(
+                f"{action} returned status={top_status!r}: {body}"
+            )
 
 
 class VeluxActiveApi:
@@ -223,6 +272,18 @@ class VeluxActiveApi:
                     raise VeluxActiveConnectionError(
                         f"Failed to set cover position: {resp.status}"
                     )
+                # Velux returns HTTP 200 even when the gateway rejects the
+                # command; inspect the body and raise VeluxActiveCommandError
+                # if there is a per-module error or non-ok status.
+                try:
+                    body = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    body = None
+                _raise_for_setstate_body(
+                    f"set_cover_position(module={module_id}, pos={position})",
+                    resp.status,
+                    body,
+                )
         except aiohttp.ClientError as err:
             raise VeluxActiveConnectionError(
                 f"Cannot connect to Velux ACTIVE: {err}"
@@ -260,6 +321,15 @@ class VeluxActiveApi:
                     raise VeluxActiveConnectionError(
                         f"Failed to set silent mode: {resp.status}"
                     )
+                try:
+                    body = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    body = None
+                _raise_for_setstate_body(
+                    f"set_silent_mode(module={module_id}, silent={silent})",
+                    resp.status,
+                    body,
+                )
         except aiohttp.ClientError as err:
             raise VeluxActiveConnectionError(
                 f"Cannot connect to Velux ACTIVE: {err}"
@@ -294,6 +364,15 @@ class VeluxActiveApi:
                     raise VeluxActiveConnectionError(
                         f"Failed to stop movements: {resp.status}"
                     )
+                try:
+                    body = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    body = None
+                _raise_for_setstate_body(
+                    f"stop_movements(bridge={bridge_id})",
+                    resp.status,
+                    body,
+                )
         except aiohttp.ClientError as err:
             raise VeluxActiveConnectionError(
                 f"Cannot connect to Velux ACTIVE: {err}"
