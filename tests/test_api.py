@@ -347,3 +347,24 @@ class TestSetstateErrorSurfacing:
             await api.async_set_silent_mode(
                 MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, True
             )
+
+    def test_command_error_is_not_connection_error(self) -> None:
+        """A per-command rejection must not be confused with a transport failure.
+
+        The coordinator catches VeluxActiveConnectionError and turns it into an
+        UpdateFailed; if VeluxActiveCommandError inherited from it, per-module
+        rejections from setstate would be silently misclassified as connection
+        failures. This regression test pins the separation.
+        """
+        assert not issubclass(VeluxActiveCommandError, VeluxActiveConnectionError)
+
+    def test_extract_setstate_errors_is_public(self) -> None:
+        """The helper is re-used by scripts/diag_setstate.py and tests."""
+        from custom_components.velux_active.api import extract_setstate_errors
+
+        assert extract_setstate_errors({"body": {"errors": [{"code": 6}]}}) == [
+            {"code": 6}
+        ]
+        assert extract_setstate_errors({"errors": [{"code": 6}]}) == [{"code": 6}]
+        assert extract_setstate_errors({"status": "ok"}) == []
+        assert extract_setstate_errors(None) == []

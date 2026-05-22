@@ -50,7 +50,7 @@ class VeluxActiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._names_fetched_at: float = 0.0
 
     def _extract_names(self, data: Any) -> None:
-        """Recursively extract all 'id' -> 'name' and 'room_id' mappings."""
+        """Recursively extract 'id' -> 'name', 'room_id', and 'bridge' mappings."""
         if isinstance(data, dict):
             item_id = data.get("id")
             if isinstance(item_id, str):
@@ -87,8 +87,21 @@ class VeluxActiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self.api.async_get_homes_data()
         except (VeluxActiveAuthError, VeluxActiveConnectionError) as err:
+            # Note: we intentionally do NOT set _names_fetched_at on failure,
+            # so the next coordinator poll will retry (rather than waiting the
+            # full HOMES_DATA_REFRESH_SECONDS). The integration can still serve
+            # cached names from previous successful fetches in the meantime.
             _LOGGER.warning("Failed to fetch homes data for names: %s", err)
             return
+
+        # Reset caches before re-extracting so that removed/renamed/re-paired
+        # modules don't leave stale entries behind. The dicts are the source
+        # of truth for bridge<->module mapping, so staleness here directly
+        # causes the silent-no-op bug this PR is fixing.
+        self.module_names.clear()
+        self.room_names.clear()
+        self.module_rooms.clear()
+        self.module_bridges.clear()
 
         homes = data.get("body", {}).get("homes", [])
         for home in homes:
@@ -117,9 +130,21 @@ class VeluxActiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 module["name"] = self.module_names[mod_id]
             if mod_id in self.module_rooms:
                 module["room_id"] = self.module_rooms[mod_id]
-            # Ensure the bridge id stays fresh — see HOMES_DATA_REFRESH_SECONDS
-            if mod_id in self.module_bridges and not module.get("bridge"):
-                module["bridge"] = self.module_bridges[mod_id]
+            # Ensure the bridge id stays fresh — see HOMES_DATA_REFRESH_SECONDS.
+            # If homestatus and homesdata disagree, surface it: this is exactly
+            # the silent-no-op condition we're guarding against.
+            cached_bridge = self.module_bridges.get(mod_id)
+            status_bridge = module.get("bridge")
+            if cached_bridge and status_bridge and cached_bridge != status_bridge:
+                _LOGGER.warning(
+                    "Bridge id mismatch for module %s: homestatus=%s homesdata=%s "
+                    "(using homestatus value; a KIX 300 re-pairing may have rotated it)",
+                    mod_id,
+                    status_bridge,
+                    cached_bridge,
+                )
+            if cached_bridge and not status_bridge:
+                module["bridge"] = cached_bridge
                 
         for room in home.get("rooms", []):
             if room.get("id") in self.room_names:

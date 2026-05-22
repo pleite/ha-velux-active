@@ -27,7 +27,7 @@ class VeluxActiveConnectionError(Exception):
     """Connection error."""
 
 
-class VeluxActiveCommandError(VeluxActiveConnectionError):
+class VeluxActiveCommandError(Exception):
     """The cloud accepted the request (HTTP 200) but reported a per-command error.
 
     Velux's syncapi/v1/setstate frequently returns HTTP 200 with a body of the form
@@ -35,10 +35,16 @@ class VeluxActiveCommandError(VeluxActiveConnectionError):
     is rejected by the cloud or by the KIX 300 gateway. Previously these were
     silently treated as success, which masked the root cause of "command accepted
     but device never moves" bugs. This exception surfaces them.
+
+    Note: this intentionally does NOT inherit from VeluxActiveConnectionError —
+    the connection was fine; the cloud just refused the command. Conflating the
+    two would mean any ``except VeluxActiveConnectionError`` handler (notably
+    the one in the coordinator) would silently swallow per-module rejections
+    as generic transport failures.
     """
 
 
-def _extract_setstate_errors(body: Any) -> list[Any]:
+def extract_setstate_errors(body: Any) -> list[Any]:
     """Return the list of per-command errors from a setstate response body, if any."""
     if not isinstance(body, dict):
         return []
@@ -60,7 +66,7 @@ def _raise_for_setstate_body(action: str, status: int, body: Any) -> None:
     Velux returns HTTP 200 on rejections, so we cannot rely on ``resp.ok`` alone.
     """
     _LOGGER.debug("%s response (HTTP %s): %s", action, status, body)
-    errors = _extract_setstate_errors(body)
+    errors = extract_setstate_errors(body)
     if errors:
         raise VeluxActiveCommandError(
             f"{action} rejected by Velux cloud: {errors}"
