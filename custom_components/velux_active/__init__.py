@@ -49,6 +49,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     session = async_get_clientsession(hass)
+    async def _async_persist_tokens(token_data: dict[str, float | str]) -> None:
+        updated = dict(entry.data)
+        updated["token_data"] = token_data
+        hass.config_entries.async_update_entry(entry, data=updated)
+
+    def _on_tokens_updated(token_data: dict[str, float | str]) -> None:
+        hass.async_create_task(_async_persist_tokens(token_data))
+
     api = VeluxActiveApi(
         session,
         username,
@@ -57,6 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client_secret,
         hash_sign_key=hash_sign_key,
         sign_key_id=sign_key_id,
+        on_tokens_updated=_on_tokens_updated,
     )
 
     # Restore cached tokens if available

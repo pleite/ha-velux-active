@@ -1,9 +1,11 @@
 """Tests for the Velux ACTIVE API client."""
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.velux_active.api import (
@@ -109,6 +111,118 @@ class TestAuthentication:
         await api.async_refresh_token()
 
         assert api.access_token == "mock_access_token"
+
+    @pytest.mark.asyncio
+    async def test_tokens_persisted_after_refresh(self) -> None:
+        """Test token persistence callback after token refresh."""
+        session = MagicMock()
+        session.post = MagicMock(return_value=_make_mock_response(200, MOCK_TOKEN_DATA))
+        on_tokens_updated = MagicMock()
+        api = VeluxActiveApi(
+            session,
+            MOCK_USERNAME,
+            MOCK_PASSWORD,
+            MOCK_CLIENT_ID,
+            MOCK_CLIENT_SECRET,
+            on_tokens_updated=on_tokens_updated,
+        )
+        api.restore_tokens("old_token", "old_refresh", time.time() - 1)
+
+        before = time.time()
+        await api.async_refresh_token()
+        after = time.time()
+
+        assert on_tokens_updated.call_count == 1
+        payload = on_tokens_updated.call_args.args[0]
+        assert payload["access_token"] == MOCK_TOKEN_DATA["access_token"]
+        assert payload["refresh_token"] == MOCK_TOKEN_DATA["refresh_token"]
+        assert before <= payload["token_expires_at"] <= after + MOCK_TOKEN_DATA["expires_in"]
+
+    @pytest.mark.asyncio
+    async def test_tokens_persisted_after_authenticate(self) -> None:
+        """Test token persistence callback after password grant."""
+        session = MagicMock()
+        session.post = MagicMock(return_value=_make_mock_response(200, MOCK_TOKEN_DATA))
+        on_tokens_updated = MagicMock()
+        api = VeluxActiveApi(
+            session,
+            MOCK_USERNAME,
+            MOCK_PASSWORD,
+            MOCK_CLIENT_ID,
+            MOCK_CLIENT_SECRET,
+            on_tokens_updated=on_tokens_updated,
+        )
+
+        before = time.time()
+        await api.async_authenticate()
+        after = time.time()
+
+        assert on_tokens_updated.call_count == 1
+        payload = on_tokens_updated.call_args.args[0]
+        assert payload["access_token"] == MOCK_TOKEN_DATA["access_token"]
+        assert payload["refresh_token"] == MOCK_TOKEN_DATA["refresh_token"]
+        assert before <= payload["token_expires_at"] <= after + MOCK_TOKEN_DATA["expires_in"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ensure_token_only_refreshes_once(self) -> None:
+        """Test only one refresh request is done under concurrent callers."""
+        session = MagicMock()
+        session.post = MagicMock(return_value=_make_mock_response(200, MOCK_TOKEN_DATA))
+        api = _make_api(session)
+        api.restore_tokens("expired_token", "refresh", time.time() - 1)
+
+        await asyncio.gather(api._ensure_token(), api._ensure_token())  # noqa: SLF001
+
+        assert session.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_transient_network_error_raises_no_password_grant(
+        self,
+    ) -> None:
+        """Test transient refresh errors bubble up without password grant."""
+        session = MagicMock()
+        session.post = MagicMock(
+            side_effect=aiohttp.ClientConnectorError(MagicMock(), OSError("dns"))
+        )
+        api = _make_api(session)
+        api.restore_tokens("expired_token", "refresh", time.time() - 1)
+
+        with pytest.raises(VeluxActiveConnectionError):
+            await api.async_refresh_token()
+
+        assert session.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_400_falls_back_to_password_grant_and_logs(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Test refresh 400 fallback performs password grant and logs reason."""
+        session = MagicMock()
+        refresh_resp = _make_mock_response(400, {})
+        auth_resp = _make_mock_response(200, MOCK_TOKEN_DATA)
+        session.post = MagicMock(side_effect=[refresh_resp, auth_resp])
+        api = _make_api(session)
+        api.restore_tokens("old_token", "old_refresh", time.time() - 1)
+
+        with caplog.at_level("INFO"):
+            await api.async_refresh_token()
+
+        assert "Falling back to password grant: refresh token rejected with HTTP 400" in caplog.text
+        assert session.post.call_count == 2
+        assert session.post.call_args_list[0].kwargs["data"]["grant_type"] == "refresh_token"
+        assert session.post.call_args_list[1].kwargs["data"]["grant_type"] == "password"
+
+    @pytest.mark.asyncio
+    async def test_valid_restored_token_skips_refresh(self) -> None:
+        """Test valid restored token does not trigger refresh on startup."""
+        session = MagicMock()
+        session.post = MagicMock(return_value=_make_mock_response(200, MOCK_TOKEN_DATA))
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api._ensure_token()  # noqa: SLF001
+
+        assert session.post.call_count == 0
 
     @pytest.mark.asyncio
     async def test_refresh_token_expired_falls_back_to_password(self) -> None:

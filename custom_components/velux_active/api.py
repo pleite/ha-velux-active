@@ -1,9 +1,10 @@
 """Velux ACTIVE API client."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 
@@ -96,6 +97,7 @@ class VeluxActiveApi:
         client_secret: str,
         hash_sign_key: str | None = None,
         sign_key_id: str | None = None,
+        on_tokens_updated: Callable[[dict[str, float | str]], None] | None = None,
     ) -> None:
         """Initialize the API client.
 
@@ -115,9 +117,11 @@ class VeluxActiveApi:
         self._client_secret = client_secret
         self._hash_sign_key = hash_sign_key
         self._sign_key_id = sign_key_id
+        self._on_tokens_updated = on_tokens_updated
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._token_expires_at: float = 0.0
+        self._refresh_lock = asyncio.Lock()
 
     @property
     def has_signing_material(self) -> bool:
@@ -166,11 +170,33 @@ class VeluxActiveApi:
         """Return True if the access token is still valid."""
         return (
             self._access_token is not None
-            and time.time() < self._token_expires_at - 30
+            and time.time() < self._token_expires_at - 300
         )
 
-    async def async_authenticate(self) -> dict[str, Any]:
+    def _store_token_data(self, data: dict[str, Any]) -> None:
+        """Store token values in memory and emit persistence callback."""
+        self._access_token = data["access_token"]
+        self._refresh_token = data["refresh_token"]
+        self._token_expires_at = time.time() + data.get("expires_in", 10800)
+
+        if self._on_tokens_updated is None:
+            return
+        self._on_tokens_updated(
+            {
+                "access_token": self._access_token,
+                "refresh_token": self._refresh_token,
+                "token_expires_at": self._token_expires_at,
+            }
+        )
+
+    async def async_authenticate(
+        self, reason: str = "explicit authentication request"
+    ) -> dict[str, Any]:
         """Authenticate with username/password and return token data."""
+        _LOGGER.info(
+            "Falling back to password grant: %s",
+            reason,
+        )
         try:
             async with self._session.post(
                 AUTH_URL,
@@ -196,15 +222,13 @@ class VeluxActiveApi:
                 f"Cannot connect to Velux ACTIVE: {err}"
             ) from err
 
-        self._access_token = data["access_token"]
-        self._refresh_token = data["refresh_token"]
-        self._token_expires_at = time.time() + data.get("expires_in", 10800)
+        self._store_token_data(data)
         return data
 
     async def async_refresh_token(self) -> None:
         """Refresh the access token using the refresh token."""
         if self._refresh_token is None:
-            await self.async_authenticate()
+            await self.async_authenticate(reason="missing refresh token")
             return
         try:
             async with self._session.post(
@@ -218,8 +242,9 @@ class VeluxActiveApi:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             ) as resp:
                 if resp.status in (400, 401):
-                    # Refresh token expired – fall back to password grant
-                    await self.async_authenticate()
+                    await self.async_authenticate(
+                        reason=f"refresh token rejected with HTTP {resp.status}"
+                    )
                     return
                 if not resp.ok:
                     raise VeluxActiveConnectionError(
@@ -231,13 +256,16 @@ class VeluxActiveApi:
                 f"Cannot connect to Velux ACTIVE: {err}"
             ) from err
 
-        self._access_token = data["access_token"]
-        self._refresh_token = data["refresh_token"]
-        self._token_expires_at = time.time() + data.get("expires_in", 10800)
+        self._store_token_data(data)
 
     async def _ensure_token(self) -> None:
         """Ensure we have a valid access token."""
-        if not self._is_token_valid():
+        if self._is_token_valid():
+            return
+
+        async with self._refresh_lock:
+            if self._is_token_valid():
+                return
             await self.async_refresh_token()
 
     async def async_get_homes_data(self) -> dict[str, Any]:
