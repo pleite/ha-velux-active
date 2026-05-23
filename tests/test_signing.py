@@ -45,6 +45,7 @@ from custom_components.velux_active.signing import (
     compute_hash,
     encode_sign_key_id,
     needs_signature,
+    validate_signing_material,
 )
 
 
@@ -119,6 +120,16 @@ class TestEncodeSignKeyId:
     def test_hex_too_long_raises(self):
         with pytest.raises(VeluxSigningError):
             encode_sign_key_id("0" * 64)
+
+    def test_base64_too_short_raises(self):
+        too_short_b64 = base64.urlsafe_b64encode(b"\x01" * 15).decode("ascii")
+        with pytest.raises(VeluxSigningError, match="decoded to 15 bytes, expected 16"):
+            encode_sign_key_id(too_short_b64)
+
+    def test_base64_too_long_raises(self):
+        too_long_b64 = base64.urlsafe_b64encode(b"\x01" * 17).decode("ascii")
+        with pytest.raises(VeluxSigningError, match="decoded to 17 bytes, expected 16"):
+            encode_sign_key_id(too_long_b64)
 
     def test_garbage_raises(self):
         with pytest.raises(VeluxSigningError):
@@ -238,6 +249,47 @@ class TestComputeHash:
                 device_id="d",
                 hash_sign_key="",
             )
+
+
+class TestValidateSigningMaterial:
+    """Validation tests for HashSignKey and SignKeyId lengths."""
+
+    _VALID_SIGN_ID_B64 = "AAAAAGnPxXF1vyEUZgOFAw=="
+    _VALID_HASH_KEY_HEX = "00112233445566778899aabbccddeeff" * 2
+
+    def test_hash_sign_key_too_short_hex_raises(self):
+        with pytest.raises(VeluxSigningError, match="decoded to 31 bytes, expected 32"):
+            validate_signing_material("11" * 31, self._VALID_SIGN_ID_B64)
+
+    def test_hash_sign_key_too_long_hex_raises(self):
+        with pytest.raises(VeluxSigningError, match="decoded to 33 bytes, expected 32"):
+            validate_signing_material("11" * 33, self._VALID_SIGN_ID_B64)
+
+    def test_hash_sign_key_too_short_base64_raises(self):
+        short_b64 = base64.urlsafe_b64encode(b"\x11" * 31).decode("ascii")
+        with pytest.raises(VeluxSigningError, match="decoded to 31 bytes, expected 32"):
+            validate_signing_material(short_b64, self._VALID_SIGN_ID_B64)
+
+    def test_hash_sign_key_too_long_base64_raises(self):
+        long_b64 = base64.urlsafe_b64encode(b"\x11" * 33).decode("ascii")
+        with pytest.raises(VeluxSigningError, match="decoded to 33 bytes, expected 32"):
+            validate_signing_material(long_b64, self._VALID_SIGN_ID_B64)
+
+    def test_hash_sign_key_happy_path_hex(self):
+        key, sign_id = validate_signing_material(
+            self._VALID_HASH_KEY_HEX,
+            self._VALID_SIGN_ID_B64,
+        )
+        assert len(key) == 32
+        assert sign_id == self._VALID_SIGN_ID_B64
+
+    def test_hash_sign_key_happy_path_base64(self):
+        key_b64 = base64.urlsafe_b64encode(bytes.fromhex(self._VALID_HASH_KEY_HEX)).decode(
+            "ascii"
+        )
+        key, sign_id = validate_signing_material(key_b64, self._VALID_SIGN_ID_B64)
+        assert len(key) == 32
+        assert sign_id == self._VALID_SIGN_ID_B64
 
 
 class TestBuildSignedModulePayload:

@@ -40,6 +40,7 @@
     },
     "error": {
       "sign_material_partial": "Please provide BOTH HashSignKey and SignKeyId, or leave both empty.",
+      "sign_material_bad_length": "The signing material length is invalid. HashSignKey must decode to 32 bytes and SignKeyId to 16 bytes.",
       "sign_material_invalid": "The signing material could not be parsed. Check the values against docs/EXTRACTING_SIGN_KEY.md."
     }
   },

@@ -130,6 +130,15 @@ class VeluxActiveCover(CoordinatorEntity[VeluxActiveCoordinator], CoverEntity):
             return from_cache
         return self._bridge_id
 
+    @property
+    def _current_velux_type(self) -> str:
+        """Return the current Velux module type."""
+        mod = self._module
+        velux_type = mod.get("velux_type")
+        if isinstance(velux_type, str) and velux_type:
+            return velux_type
+        return "shutter"
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Update cached state from the coordinator and write to HA."""
@@ -175,14 +184,22 @@ class VeluxActiveCover(CoordinatorEntity[VeluxActiveCoordinator], CoverEntity):
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Open the cover fully (100%)."""
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._current_bridge_id, self._module_id, 100
+            self.coordinator.home_id,
+            self._current_bridge_id,
+            self._module_id,
+            100,
+            velux_type=self._current_velux_type,
         )
         await self.coordinator.async_request_refresh()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover fully (0%)."""
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._current_bridge_id, self._module_id, 0
+            self.coordinator.home_id,
+            self._current_bridge_id,
+            self._module_id,
+            0,
+            velux_type=self._current_velux_type,
         )
         await self.coordinator.async_request_refresh()
 
@@ -190,7 +207,11 @@ class VeluxActiveCover(CoordinatorEntity[VeluxActiveCoordinator], CoverEntity):
         """Set the cover to a specific position."""
         position: int = kwargs[ATTR_POSITION]
         await self.coordinator.api.async_set_cover_position(
-            self.coordinator.home_id, self._current_bridge_id, self._module_id, position
+            self.coordinator.home_id,
+            self._current_bridge_id,
+            self._module_id,
+            position,
+            velux_type=self._current_velux_type,
         )
         await self.coordinator.async_request_refresh()
 

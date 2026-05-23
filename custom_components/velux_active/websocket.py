@@ -52,6 +52,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -63,7 +64,8 @@ WEBSOCKET_URL = "wss://app-ws.velux-active.com/ws/"
 
 # How long we wait between reconnect attempts. Starts low so a transient
 # network blip recovers fast; caps so we don't hammer Velux's servers
-# during a sustained outage. Jitter is added per-attempt.
+# during a sustained outage. Each attempt applies random jitter to avoid
+# synchronized reconnect storms from multiple clients.
 _INITIAL_BACKOFF_S = 2.0
 _MAX_BACKOFF_S = 300.0  # 5 minutes
 _BACKOFF_MULTIPLIER = 2.0
@@ -139,23 +141,26 @@ class VeluxActiveWebsocket:
     async def _run_forever(self) -> None:
         backoff = _INITIAL_BACKOFF_S
         while not self._stop_event.is_set():
+            sleep_for = backoff
             try:
                 await self._run_once()
                 # Clean disconnect — reset backoff before reconnecting.
                 backoff = _INITIAL_BACKOFF_S
+                sleep_for = backoff
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 — websocket lib raises
                 # everything from ServerHandshakeError to ClientOSError
                 # here; we log and back off uniformly.
+                sleep_for = min(backoff, _MAX_BACKOFF_S) * random.uniform(0.5, 1.5)
                 _LOGGER.warning(
                     "Velux websocket disconnected (%s); reconnecting in %.1fs",
                     err,
-                    backoff,
+                    sleep_for,
                 )
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=backoff
+                    self._stop_event.wait(), timeout=sleep_for
                 )
                 return  # stop signalled during backoff
             except asyncio.TimeoutError:

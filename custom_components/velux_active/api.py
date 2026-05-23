@@ -283,7 +283,13 @@ class VeluxActiveApi:
             ) from err
 
     async def async_set_cover_position(
-        self, home_id: str, bridge_id: str, module_id: str, position: int
+        self,
+        home_id: str,
+        bridge_id: str,
+        module_id: str,
+        position: int,
+        *,
+        velux_type: str = "window",
     ) -> None:
         """Set the target position of a cover module (0–100).
 
@@ -294,12 +300,17 @@ class VeluxActiveApi:
         See ``custom_components/velux_active/signing.py``.
 
         We only attempt to sign when :func:`needs_signature` returns
-        True; closing (``position == 0``) and roller-shutter moves stay
-        unsigned for byte-identical wire compatibility with the
-        long-standing IngmarStein code path.
+        True *and* ``velux_type == "window"``; closing
+        (``position == 0``) and shutter/blind/awning moves stay unsigned
+        for byte-identical wire compatibility with the long-standing
+        IngmarStein code path.
         """
         await self._ensure_token()
-        if needs_signature("target_position", position):
+        should_sign = (
+            velux_type == "window"
+            and needs_signature("target_position", position)
+        )
+        if should_sign:
             if not self.has_signing_material:
                 raise VeluxSigningError(
                     "This command (target_position > 0 on a window module) "
@@ -357,7 +368,7 @@ class VeluxActiveApi:
                     body = None
                 _raise_for_setstate_body(
                     f"set_cover_position(module={module_id}, pos={position}, "
-                    f"signed={needs_signature('target_position', position)})",
+                    f"signed={should_sign})",
                     resp.status,
                     body,
                 )

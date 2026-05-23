@@ -28,7 +28,7 @@ from .const import (
     DOMAIN,
     UPDATE_INTERVAL,
 )
-from .signing import VeluxSigningError, encode_sign_key_id, _decode_hash_sign_key
+from .signing import VeluxSigningError, validate_signing_material
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,15 +191,20 @@ class VeluxActiveOptionsFlow(OptionsFlow):
             # silent half-configurations.
             hash_key = (user_input.get(CONF_HASH_SIGN_KEY) or "").strip()
             sign_id = (user_input.get(CONF_SIGN_KEY_ID) or "").strip()
+            normalized_sign_id = sign_id
             if bool(hash_key) ^ bool(sign_id):
                 errors["base"] = "sign_material_partial"
             elif hash_key and sign_id:
                 try:
-                    _decode_hash_sign_key(hash_key)
-                    encode_sign_key_id(sign_id)
+                    _, normalized_sign_id = validate_signing_material(
+                        hash_key, sign_id
+                    )
                 except VeluxSigningError as err:
                     _LOGGER.warning("Invalid sign material: %s", err)
-                    errors["base"] = "sign_material_invalid"
+                    if "expected 32" in str(err) or "expected 16" in str(err):
+                        errors["base"] = "sign_material_bad_length"
+                    else:
+                        errors["base"] = "sign_material_invalid"
             if not errors:
                 # Store normalised empty-string-to-absent so the API
                 # client's ``has_signing_material`` check stays simple.
@@ -211,7 +216,7 @@ class VeluxActiveOptionsFlow(OptionsFlow):
                 if hash_key:
                     cleaned[CONF_HASH_SIGN_KEY] = hash_key
                 if sign_id:
-                    cleaned[CONF_SIGN_KEY_ID] = sign_id
+                    cleaned[CONF_SIGN_KEY_ID] = normalized_sign_id
                 return self.async_create_entry(title="", data=cleaned)
 
         current_interval = self._config_entry.options.get(

@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import VeluxActiveApi, VeluxActiveAuthError, VeluxActiveConnectionError
 from .const import DOMAIN, UPDATE_INTERVAL
+from .websocket import VeluxActiveWebsocket
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class VeluxActiveCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.room_names: dict[str, str] = {}
         self.module_rooms: dict[str, str] = {}
         self.module_bridges: dict[str, str] = {}
+        self.websocket: VeluxActiveWebsocket | None = None
         self._names_fetched_at: float = 0.0
 
     def _extract_names(self, data: Any) -> None:

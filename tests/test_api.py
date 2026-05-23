@@ -505,3 +505,32 @@ class TestSignedSetCoverPosition:
             assert forbidden not in module, (
                 f"close command must not include {forbidden!r}"
             )
+
+    @pytest.mark.asyncio
+    async def test_shutter_open_without_sign_material_stays_unsigned(self) -> None:
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api.async_set_cover_position(
+            MOCK_HOME_ID,
+            MOCK_BRIDGE_ID,
+            MOCK_MODULE_ID,
+            50,
+            velux_type="shutter",
+        )
+
+        assert session.post.called
+        _, kwargs = session.post.call_args
+        module = kwargs["json"]["home"]["modules"][0]
+        assert module["target_position"] == 50
+        for forbidden in (
+            "hash_target_position",
+            "sign_key_id",
+            "nonce",
+            "timestamp",
+        ):
+            assert forbidden not in module

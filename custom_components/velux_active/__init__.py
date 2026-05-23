@@ -98,11 +98,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     websocket.register_callback(_on_push)
     await websocket.async_start()
 
-    # Stash auxiliary objects on the coordinator so existing platforms
-    # that do ``hass.data[DOMAIN][entry.entry_id]`` and treat the value
-    # as a coordinator keep working without modification.
-    coordinator.websocket = websocket  # type: ignore[attr-defined]
-    coordinator.api = api  # type: ignore[attr-defined]
+    # Stash websocket on the coordinator for unload-time shutdown.
+    coordinator.websocket = websocket
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     # React to options-flow changes (e.g. user pastes a new sign key)
@@ -123,8 +120,7 @@ async def _async_options_updated(
     coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if not coordinator:
         return
-    api: VeluxActiveApi = coordinator.api  # type: ignore[attr-defined]
-    api.update_signing_material(
+    coordinator.api.update_signing_material(
         entry.options.get(CONF_HASH_SIGN_KEY)
         or entry.data.get(CONF_HASH_SIGN_KEY),
         entry.options.get(CONF_SIGN_KEY_ID)
@@ -132,7 +128,7 @@ async def _async_options_updated(
     )
     _LOGGER.info(
         "Velux signing material updated (configured=%s)",
-        api.has_signing_material,
+        coordinator.api.has_signing_material,
     )
 
 
@@ -140,9 +136,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         coordinator = hass.data[DOMAIN].pop(entry.entry_id)
-        websocket: VeluxActiveWebsocket | None = getattr(
-            coordinator, "websocket", None
-        )
-        if websocket is not None:
-            await websocket.async_stop()
+        if coordinator.websocket is not None:
+            await coordinator.websocket.async_stop()
     return unload_ok

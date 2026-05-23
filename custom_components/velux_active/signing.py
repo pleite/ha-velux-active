@@ -116,7 +116,14 @@ def _decode_hash_sign_key(hash_sign_key: str) -> bytes:
         raise VeluxSigningError("HashSignKey is empty")
     # Try hex first — the canonical form from ZTHawk patches.
     try:
-        return bytes.fromhex(cleaned)
+        decoded = bytes.fromhex(cleaned)
+        if len(decoded) != 32:
+            raise VeluxSigningError(
+                "HashSignKey decoded to "
+                f"{len(decoded)} bytes, expected 32. "
+                "Check that you copied the full key from the iOS keychain / APK logcat."
+            )
+        return decoded
     except ValueError:
         pass
     # Fall back to base64 (url-safe or standard) for keychain-dumped
@@ -125,7 +132,14 @@ def _decode_hash_sign_key(hash_sign_key: str) -> bytes:
     try:
         # Pad for standard b64 if needed.
         padded = cleaned + "=" * (-len(cleaned) % 4)
-        return base64.urlsafe_b64decode(padded)
+        decoded = base64.urlsafe_b64decode(padded)
+        if len(decoded) != 32:
+            raise VeluxSigningError(
+                "HashSignKey decoded to "
+                f"{len(decoded)} bytes, expected 32. "
+                "Check that you copied the full key from the iOS keychain / APK logcat."
+            )
+        return decoded
     except (ValueError, binascii.Error) as err:
         raise VeluxSigningError(
             "HashSignKey must be hex or base64 — got a value that is neither"
@@ -158,18 +172,39 @@ def encode_sign_key_id(sign_key_id_hex: str) -> str:
         # Trust it as already-encoded base64; round-trip to validate.
         try:
             padded = cleaned + "=" * (-len(cleaned) % 4)
-            base64.urlsafe_b64decode(padded)
+            decoded = base64.urlsafe_b64decode(padded)
         except (ValueError, binascii.Error) as err:
             raise VeluxSigningError(
                 "SignKeyId looks neither like hex nor like base64"
             ) from err
+        if len(decoded) != 16:
+            raise VeluxSigningError(
+                "SignKeyId decoded to "
+                f"{len(decoded)} bytes, expected 16. "
+                "Check that you copied the full SignKeyId value."
+            )
         return cleaned
     if len(cleaned) > 32:
         raise VeluxSigningError(
             f"SignKeyId hex is too long ({len(cleaned)} chars > 32)"
         )
     padded_hex = cleaned.rjust(32, "0")
-    return base64.urlsafe_b64encode(bytes.fromhex(padded_hex)).decode("ascii")
+    decoded_hex = bytes.fromhex(padded_hex)
+    if len(decoded_hex) != 16:
+        raise VeluxSigningError(
+            "SignKeyId decoded to "
+            f"{len(decoded_hex)} bytes, expected 16. "
+            "Check that you copied the full SignKeyId value."
+        )
+    return base64.urlsafe_b64encode(decoded_hex).decode("ascii")
+
+
+def validate_signing_material(hash_key: str, sign_id: str) -> tuple[bytes, str]:
+    """Validate and normalize signing material for use by callers.
+
+    Returns raw HashSignKey bytes and canonical wire-format sign_key_id.
+    """
+    return _decode_hash_sign_key(hash_key), encode_sign_key_id(sign_id)
 
 
 def compute_hash(
