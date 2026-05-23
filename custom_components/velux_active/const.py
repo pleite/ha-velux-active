@@ -33,3 +33,10 @@ MODEL_MAP = {
 }
 
 UPDATE_INTERVAL = 60  # seconds
+
+# Options keys for the (optional) HMAC-SHA512 signing material that
+# the Velux cloud requires for window-open commands. See
+# ``custom_components/velux_active/signing.py`` for the protocol and
+# ``docs/EXTRACTING_SIGN_KEY.md`` for how to obtain these values.
+CONF_HASH_SIGN_KEY = "hash_sign_key"
+CONF_SIGN_KEY_ID = "sign_key_id"

@@ -15,6 +15,11 @@ from .const import (
     SET_PERSONS_AWAY_URL,
     SET_PERSONS_HOME_URL,
 )
+from .signing import (
+    VeluxSigningError,
+    build_signed_module_payload,
+    needs_signature,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,16 +94,47 @@ class VeluxActiveApi:
         password: str,
         client_id: str,
         client_secret: str,
+        hash_sign_key: str | None = None,
+        sign_key_id: str | None = None,
     ) -> None:
-        """Initialize the API client."""
+        """Initialize the API client.
+
+        ``hash_sign_key`` and ``sign_key_id`` are optional. When both are
+        provided, the client signs the commands the Velux cloud
+        cryptographically requires (currently ``target_position > 0`` on
+        window modules and ``scenario == "home"``). When either is
+        missing, signed commands will raise :class:`VeluxSigningError`
+        at request time — unsigned commands (close, shutter, stop,
+        silent, scenario != "home") work either way. See
+        ``custom_components/velux_active/signing.py`` for the protocol.
+        """
         self._session = session
         self._username = username
         self._password = password
         self._client_id = client_id
         self._client_secret = client_secret
+        self._hash_sign_key = hash_sign_key
+        self._sign_key_id = sign_key_id
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._token_expires_at: float = 0.0
+
+    @property
+    def has_signing_material(self) -> bool:
+        """Return True when signed commands can be built."""
+        return bool(self._hash_sign_key and self._sign_key_id)
+
+    def update_signing_material(
+        self, hash_sign_key: str | None, sign_key_id: str | None
+    ) -> None:
+        """Replace the in-memory signing material at runtime.
+
+        Called by the options flow when the user pastes (or rotates) the
+        keys. Storing ``None`` for either field is allowed and disables
+        signed commands.
+        """
+        self._hash_sign_key = hash_sign_key
+        self._sign_key_id = sign_key_id
 
     @property
     def access_token(self) -> str | None:
@@ -247,26 +283,71 @@ class VeluxActiveApi:
             ) from err
 
     async def async_set_cover_position(
-        self, home_id: str, bridge_id: str, module_id: str, position: int
+        self,
+        home_id: str,
+        bridge_id: str,
+        module_id: str,
+        position: int,
+        *,
+        velux_type: str = "window",
     ) -> None:
-        """Set the target position of a cover module (0–100)."""
+        """Set the target position of a cover module (0–100).
+
+        Window modules (and other safety-restricted devices) require an
+        HMAC-SHA512 signature on any ``position > 0`` command — without
+        it the cloud silently rejects the request with
+        ``{"errors": [{"code": 9, ...}]}`` and the device never moves.
+        See ``custom_components/velux_active/signing.py``.
+
+        We only attempt to sign when :func:`needs_signature` returns
+        True *and* ``velux_type == "window"``; closing
+        (``position == 0``) and shutter/blind/awning moves stay unsigned
+        for byte-identical wire compatibility with the long-standing
+        IngmarStein code path.
+        """
         await self._ensure_token()
-        payload = {
-            "home": {
-                "id": home_id,
-                "modules": [
-                    {
-                        "bridge": bridge_id,
-                        "id": module_id,
-                        "target_position": position,
-                    }
-                ],
+        should_sign = (
+            velux_type == "window"
+            and needs_signature("target_position", position)
+        )
+        if should_sign:
+            if not self.has_signing_material:
+                raise VeluxSigningError(
+                    "This command (target_position > 0 on a window module) "
+                    "requires HashSignKey and SignKeyId to be configured. "
+                    "See docs/EXTRACTING_SIGN_KEY.md."
+                )
+            module_payload = build_signed_module_payload(
+                module_id=module_id,
+                bridge_id=bridge_id,
+                item_name="target_position",
+                value=position,
+                hash_sign_key=self._hash_sign_key,  # type: ignore[arg-type]
+                sign_key_id=self._sign_key_id,  # type: ignore[arg-type]
+            )
+            # The iOS app also sends app_identifier; harmless but
+            # included for wire-fidelity with captured traffic.
+            envelope: dict[str, Any] = {
+                "app_identifier": "app_velux",
+                "home": {"id": home_id, "modules": [module_payload]},
             }
-        }
+        else:
+            envelope = {
+                "home": {
+                    "id": home_id,
+                    "modules": [
+                        {
+                            "bridge": bridge_id,
+                            "id": module_id,
+                            "target_position": position,
+                        }
+                    ],
+                }
+            }
         try:
             async with self._session.post(
                 SET_STATE_URL,
-                json=payload,
+                json=envelope,
                 headers={
                     "Content-Type": "application/json; charset=utf-8",
                     "Authorization": f"Bearer {self._access_token}",
@@ -286,7 +367,8 @@ class VeluxActiveApi:
                 except (aiohttp.ContentTypeError, ValueError):
                     body = None
                 _raise_for_setstate_body(
-                    f"set_cover_position(module={module_id}, pos={position})",
+                    f"set_cover_position(module={module_id}, pos={position}, "
+                    f"signed={should_sign})",
                     resp.status,
                     body,
                 )

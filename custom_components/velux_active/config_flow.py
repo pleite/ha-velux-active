@@ -21,11 +21,14 @@ from .api import VeluxActiveApi, VeluxActiveAuthError, VeluxActiveConnectionErro
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
+    CONF_HASH_SIGN_KEY,
+    CONF_SIGN_KEY_ID,
     DEFAULT_CLIENT_ID,
     DEFAULT_CLIENT_SECRET,
     DOMAIN,
     UPDATE_INTERVAL,
 )
+from .signing import VeluxSigningError, validate_signing_material
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,19 +183,73 @@ class VeluxActiveOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage options."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Validate the signing material if either field was provided.
+            # We accept "both empty" (signing disabled) or "both present
+            # and parse-clean"; rejecting "one set, one empty" prevents
+            # silent half-configurations.
+            hash_key = (user_input.get(CONF_HASH_SIGN_KEY) or "").strip()
+            sign_id = (user_input.get(CONF_SIGN_KEY_ID) or "").strip()
+            normalized_sign_id = sign_id
+            if bool(hash_key) ^ bool(sign_id):
+                errors["base"] = "sign_material_partial"
+            elif hash_key and sign_id:
+                try:
+                    _, normalized_sign_id = validate_signing_material(
+                        hash_key, sign_id
+                    )
+                except VeluxSigningError as err:
+                    _LOGGER.warning("Invalid sign material: %s", err)
+                    if "expected 32" in str(err) or "expected 16" in str(err):
+                        errors["base"] = "sign_material_bad_length"
+                    else:
+                        errors["base"] = "sign_material_invalid"
+            if not errors:
+                # Store normalised empty-string-to-absent so the API
+                # client's ``has_signing_material`` check stays simple.
+                cleaned = {
+                    "update_interval": user_input.get(
+                        "update_interval", UPDATE_INTERVAL
+                    ),
+                }
+                if hash_key:
+                    cleaned[CONF_HASH_SIGN_KEY] = hash_key
+                if sign_id:
+                    cleaned[CONF_SIGN_KEY_ID] = normalized_sign_id
+                return self.async_create_entry(title="", data=cleaned)
 
         current_interval = self._config_entry.options.get(
             "update_interval", UPDATE_INTERVAL
+        )
+        current_hash_key = self._config_entry.options.get(
+            CONF_HASH_SIGN_KEY, ""
+        )
+        current_sign_id = self._config_entry.options.get(
+            CONF_SIGN_KEY_ID, ""
         )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Optional("update_interval", default=current_interval): vol.All(
-                        int, vol.Range(min=10, max=3600)
-                    )
+                    vol.Optional(
+                        "update_interval", default=current_interval
+                    ): vol.All(int, vol.Range(min=10, max=3600)),
+                    vol.Optional(
+                        CONF_HASH_SIGN_KEY, default=current_hash_key
+                    ): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                    vol.Optional(
+                        CONF_SIGN_KEY_ID, default=current_sign_id
+                    ): str,
                 }
             ),
+            errors=errors,
+            description_placeholders={
+                "extracting_guide": (
+                    "See docs/EXTRACTING_SIGN_KEY.md for how to obtain "
+                    "HashSignKey and SignKeyId."
+                )
+            },
         )

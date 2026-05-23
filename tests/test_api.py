@@ -35,10 +35,28 @@ def _make_mock_response(status: int, json_data: dict) -> MagicMock:
     return mock_resp
 
 
-def _make_api(session: MagicMock) -> VeluxActiveApi:
+def _make_api(
+    session: MagicMock,
+    *,
+    hash_sign_key: str | None = None,
+    sign_key_id: str | None = None,
+) -> VeluxActiveApi:
     return VeluxActiveApi(
-        session, MOCK_USERNAME, MOCK_PASSWORD, MOCK_CLIENT_ID, MOCK_CLIENT_SECRET
+        session,
+        MOCK_USERNAME,
+        MOCK_PASSWORD,
+        MOCK_CLIENT_ID,
+        MOCK_CLIENT_SECRET,
+        hash_sign_key=hash_sign_key,
+        sign_key_id=sign_key_id,
     )
+
+
+# A fabricated key + the captured-from-iOS sign_key_id, used purely to
+# exercise the signed code path in unit tests. The HashSignKey is NOT
+# a real one — see test_signing.py for the algorithm pinning.
+_TEST_HASH_KEY = "00112233445566778899aabbccddeeff" * 2
+_TEST_SIGN_KEY_ID = "69cfc57175bf211466038503"
 
 
 class TestAuthentication:
@@ -169,7 +187,13 @@ class TestApiMethods:
 
     @pytest.mark.asyncio
     async def test_set_cover_position(self) -> None:
-        """Test setting a cover position."""
+        """Test setting a cover position.
+
+        Uses position=0 (close) because position>0 now requires the
+        HMAC signing material (see signing.py + test_signing.py).
+        The signed-path behaviour is asserted separately in
+        :class:`TestSignedSetCoverPosition`.
+        """
         session = MagicMock()
         session.post = MagicMock(
             return_value=_make_mock_response(200, {"status": "ok"})
@@ -177,7 +201,7 @@ class TestApiMethods:
         api = _make_api(session)
         api.restore_tokens("token", "refresh", time.time() + 3600)
 
-        await api.async_set_cover_position(MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 75)
+        await api.async_set_cover_position(MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 0)
 
         assert session.post.called
 
@@ -277,7 +301,11 @@ class TestSetstateErrorSurfacing:
                 },
             )
         )
-        api = _make_api(session)
+        api = _make_api(
+            session,
+            hash_sign_key=_TEST_HASH_KEY,
+            sign_key_id=_TEST_SIGN_KEY_ID,
+        )
         api.restore_tokens("token", "refresh", time.time() + 3600)
 
         with pytest.raises(VeluxActiveCommandError):
@@ -292,7 +320,11 @@ class TestSetstateErrorSurfacing:
         session.post = MagicMock(
             return_value=_make_mock_response(200, {"status": "rejected"})
         )
-        api = _make_api(session)
+        api = _make_api(
+            session,
+            hash_sign_key=_TEST_HASH_KEY,
+            sign_key_id=_TEST_SIGN_KEY_ID,
+        )
         api.restore_tokens("token", "refresh", time.time() + 3600)
 
         with pytest.raises(VeluxActiveCommandError):
@@ -302,12 +334,16 @@ class TestSetstateErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_set_cover_position_ok_body_still_succeeds(self) -> None:
-        """A plain {"status":"ok"} body must NOT raise."""
+        """A plain {\"status\":\"ok\"} body must NOT raise."""
         session = MagicMock()
         session.post = MagicMock(
             return_value=_make_mock_response(200, {"status": "ok"})
         )
-        api = _make_api(session)
+        api = _make_api(
+            session,
+            hash_sign_key=_TEST_HASH_KEY,
+            sign_key_id=_TEST_SIGN_KEY_ID,
+        )
         api.restore_tokens("token", "refresh", time.time() + 3600)
 
         await api.async_set_cover_position(
@@ -368,3 +404,133 @@ class TestSetstateErrorSurfacing:
         assert extract_setstate_errors({"errors": [{"code": 6}]}) == [{"code": 6}]
         assert extract_setstate_errors({"status": "ok"}) == []
         assert extract_setstate_errors(None) == []
+
+
+class TestSignedSetCoverPosition:
+    """Pin the signed-path behaviour for window-OPEN commands.
+
+    These are unit tests at the API client boundary; the algorithm
+    itself is pinned in tests/test_signing.py. Here we verify that:
+
+    1. Opening (position > 0) without sign material raises a clear
+       configuration error rather than hitting the cloud and getting a
+       silent code-9 rejection.
+    2. Opening with sign material adds the four required fields
+       (timestamp, nonce, sign_key_id, hash_target_position) to the
+       per-module dict on the wire.
+    3. Closing (position == 0) never carries signature fields, even
+       when sign material is configured — byte-identical to the
+       legacy IngmarStein wire format.
+    """
+
+    @pytest.mark.asyncio
+    async def test_open_without_sign_material_raises_clear_error(self) -> None:
+        from custom_components.velux_active.signing import VeluxSigningError
+
+        session = MagicMock()
+        # Even though the cloud would 200, we should fail-fast locally.
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(session)  # no sign material
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        with pytest.raises(VeluxSigningError):
+            await api.async_set_cover_position(
+                MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 50
+            )
+        # The HTTP layer should not have been touched.
+        assert not session.post.called
+
+    @pytest.mark.asyncio
+    async def test_open_with_sign_material_sends_signed_payload(self) -> None:
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(
+            session,
+            hash_sign_key=_TEST_HASH_KEY,
+            sign_key_id=_TEST_SIGN_KEY_ID,
+        )
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api.async_set_cover_position(
+            MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 50
+        )
+
+        # Recover the JSON we sent. aiohttp's session.post(json=...)
+        # forwards to MagicMock so we inspect the kwargs.
+        assert session.post.called
+        _, kwargs = session.post.call_args
+        body = kwargs["json"]
+        module = body["home"]["modules"][0]
+        # Required signed fields
+        assert module["target_position"] == 50
+        assert "hash_target_position" in module
+        assert len(module["hash_target_position"]) == 88
+        assert isinstance(module["timestamp"], int) and module["timestamp"] > 0
+        assert module["nonce"] == 0
+        assert module["sign_key_id"] == "AAAAAGnPxXF1vyEUZgOFAw=="
+
+    @pytest.mark.asyncio
+    async def test_close_never_carries_signature_fields(self) -> None:
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(
+            session,
+            hash_sign_key=_TEST_HASH_KEY,
+            sign_key_id=_TEST_SIGN_KEY_ID,
+        )
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api.async_set_cover_position(
+            MOCK_HOME_ID, MOCK_BRIDGE_ID, MOCK_MODULE_ID, 0
+        )
+
+        _, kwargs = session.post.call_args
+        module = kwargs["json"]["home"]["modules"][0]
+        assert module["target_position"] == 0
+        # All signature fields MUST be absent for closes — the legacy
+        # ha-velux-active wire format had no concept of them and Velux
+        # accepts the unsigned form.
+        for forbidden in (
+            "hash_target_position",
+            "sign_key_id",
+            "nonce",
+            "timestamp",
+        ):
+            assert forbidden not in module, (
+                f"close command must not include {forbidden!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_shutter_open_without_sign_material_stays_unsigned(self) -> None:
+        session = MagicMock()
+        session.post = MagicMock(
+            return_value=_make_mock_response(200, {"status": "ok"})
+        )
+        api = _make_api(session)
+        api.restore_tokens("token", "refresh", time.time() + 3600)
+
+        await api.async_set_cover_position(
+            MOCK_HOME_ID,
+            MOCK_BRIDGE_ID,
+            MOCK_MODULE_ID,
+            50,
+            velux_type="shutter",
+        )
+
+        assert session.post.called
+        _, kwargs = session.post.call_args
+        module = kwargs["json"]["home"]["modules"][0]
+        assert module["target_position"] == 50
+        for forbidden in (
+            "hash_target_position",
+            "sign_key_id",
+            "nonce",
+            "timestamp",
+        ):
+            assert forbidden not in module
